@@ -3,11 +3,28 @@ from dotenv import load_dotenv
 import os
 import requests
 from collections import defaultdict
+from classes import CurrentToken, OldToken
 import time
+import psycopg2
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy_aio import ASYNCIO_STRATEGY
+from classes import Base, CurrentToken, OldToken
 
 load_dotenv()
 ALCHEMY_API_KEY = os.getenv("ALCHEMY_API_KEY")
 ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY")
+DB_URL = os.getenv("DB_URL")
+
+engine = create_engine(
+    DB_URL,
+    strategy=ASYNCIO_STRATEGY
+)
+
+async with engine.begin() as connection:
+    await connection.run_sync(Base.metadata.create_all)
+
+Session = sessionmaker(bind=engine)
 
 w3 = Web3(Web3.HTTPProvider(f'https://eth-mainnet.alchemyapi.io/v2/{ALCHEMY_API_KEY}'))
 
