@@ -2,6 +2,7 @@ from web3 import Web3
 from dotenv import load_dotenv
 import os
 import requests
+import asyncio
 from collections import defaultdict
 from classes import CurrentToken, OldToken
 import time
@@ -23,8 +24,10 @@ engine = create_engine(
 )
 
 # Create all tables in the database which are defined by Base's subclasses
-async with engine.begin() as connection:
-    await connection.run_sync(Base.metadata.create_all)
+
+async def init_db():
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
 
 Session = sessionmaker(bind=engine)
 
@@ -82,68 +85,74 @@ contract_first_seen = {}
 prevBlock = None
 cache_abi = {}
 
-while True:
-    try:
-        block = w3.eth.getBlock('latest')
-        if prevBlock != block.number:
-            for tx in block.transactions:
-                transaction = w3.eth.getTransaction(tx)
-                contract_address = transaction['to']
-                value = transaction['value']
 
-                # Fetch ABI only if it's not in the cache
-                if contract_address not in cache_abi:
-                    try:
-                        response = send_request(
-                            f'https://api.etherscan.io/api?module=contract&action=getabi&address={contract_address}&apikey={ETHERSCAN_API_KEY}')
-                        abi = response['result']
-                        cache_abi[contract_address] = abi
-                    except Exception as e:
-                        print(
-                            f"Failed to fetch ABI for contract {contract_address}, error: {e}")
-                        continue
+async def main():
+  await init_db()
 
-                # Exclude non-token/NFT transactions
-                contract = w3.eth.contract(
-                    address=contract_address, abi=cache_abi[contract_address])
-
-                try:
-                    # Decode function input to get function name
-                    input_data = transaction['input']
-                    try:
-                        function_name, _ = contract.decode_function_input(
-                            input_data)
-                    except Exception as e:
-                        print(
-                            f"Failed to decode input data for contract {contract_address}, error: {e}")
-                        function_name = None
-
-                    if function_name not in ['transfer', 'transferFrom']:
-                        continue
-                except Exception as e:
-                    print(
-                        f"Failed to decode input data for contract {contract_address}, error: {e}")
-                    continue
-
-                # Get token decimals
-                decimals = get_token_decimals(contract)
-
-                # Adjust the value accordingly
-                value_adjusted = value / 10 ** decimals
-
-                # Interact with database
-                async with Session() as session:
-                    if not await was_seen_before(session, contract_address):
-                        contract_first_seen[contract_address] = time.time()
-                        await add_token(session, contract_address, contract_first_seen[contract_address], value_adjusted)
-                    else:
-                        await update_token(session, contract_address, value_adjusted)
-
-            # After processing all transactions in the block
-            async with Session() as session:
-                await consolidate_old_tokens(session)
-
-            prevBlock = block.number
-        time.sleep(15) # sleeps for 15 seconds
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+  while True:
+      try:
+          block = w3.eth.getBlock('latest')
+          if prevBlock != block.number:
+              for tx in block.transactions:
+                  transaction = w3.eth.getTransaction(tx)
+                  contract_address = transaction['to']
+                  value = transaction['value']
+  
+                  # Fetch ABI only if it's not in the cache
+                  if contract_address not in cache_abi:
+                      try:
+                          response = send_request(
+                              f'https://api.etherscan.io/api?module=contract&action=getabi&address={contract_address}&apikey={ETHERSCAN_API_KEY}')
+                          abi = response['result']
+                          cache_abi[contract_address] = abi
+                      except Exception as e:
+                          print(
+                              f"Failed to fetch ABI for contract {contract_address}, error: {e}")
+                          continue
+                        
+                  # Exclude non-token/NFT transactions
+                  contract = w3.eth.contract(
+                      address=contract_address, abi=cache_abi[contract_address])
+  
+                  try:
+                      # Decode function input to get function name
+                      input_data = transaction['input']
+                      try:
+                          function_name, _ = contract.decode_function_input(
+                              input_data)
+                      except Exception as e:
+                          print(
+                              f"Failed to decode input data for contract {contract_address}, error: {e}")
+                          function_name = None
+  
+                      if function_name not in ['transfer', 'transferFrom']:
+                          continue
+                  except Exception as e:
+                      print(
+                          f"Failed to decode input data for contract {contract_address}, error: {e}")
+                      continue
+                    
+                  # Get token decimals
+                  decimals = get_token_decimals(contract)
+  
+                  # Adjust the value accordingly
+                  value_adjusted = value / 10 ** decimals
+  
+                  # Interact with database
+                  async with Session() as session:
+                      if not await was_seen_before(session, contract_address):
+                          contract_first_seen[contract_address] = time.time()
+                          await add_token(session, contract_address, contract_first_seen[contract_address], value_adjusted)
+                      else:
+                          await update_token(session, contract_address, value_adjusted)
+  
+              # After processing all transactions in the block
+              async with Session() as session:
+                  await consolidate_old_tokens(session)
+  
+              prevBlock = block.number
+          await asyncio.sleep(15)  # sleeps for 15 seconds
+      except Exception as e:
+          print(f"An unexpected error occurred: {e}")
+          
+asyncio.run(main())
