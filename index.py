@@ -129,14 +129,16 @@ async def main():
                               input_data)
                       except Exception as e:
                           print(
-                              f"Failed to decode input data for contract {contract_address}, error: {e}")
+                              f"Failed to decode input data for contract {contract_address}, error: {e} Ignoring this transaction.")
                           function_name = None
   
                       if function_name not in ['transfer', 'transferFrom']:
+                        print(
+                            f"The function {function_name} for contract {contract_address} is not transfer or transferFrom. Ignoring this transaction.")
                           continue
                   except Exception as e:
                       print(
-                          f"Failed to decode input data for contract {contract_address}, error: {e}")
+                          f"Failed to decode input data for contract {contract_address}, error: {e} Ignoring this transaction.")
                       continue
                     
                   # Get token decimals
