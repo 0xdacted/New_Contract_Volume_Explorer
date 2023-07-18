@@ -6,10 +6,9 @@ import asyncio
 from collections import defaultdict
 from classes import CurrentToken, OldToken
 import time
-import psycopg2
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy_aio import ASYNCIO_STRATEGY
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from classes import Base, CurrentToken, OldToken
 from datetime import datetime, timedelta
 
@@ -18,20 +17,19 @@ ALCHEMY_API_KEY = os.getenv("ALCHEMY_API_KEY")
 ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY")
 DB_URL = os.getenv("DB_URL")
 
-engine = create_engine(
-    DB_URL,
-    strategy=ASYNCIO_STRATEGY
-)
+engine = create_async_engine(DB_URL)
 
 # Create all tables in the database which are defined by Base's subclasses
 
 async def init_db():
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
 
-Session = sessionmaker(bind=engine)
+AsyncSession = sessionmaker(
+    engine, expire_on_commit=False, class_=AsyncSession)
 
-w3 = Web3(Web3.HTTPProvider(f'https://eth-mainnet.alchemyapi.io/v2/{ALCHEMY_API_KEY}'))
+w3 = Web3(Web3.HTTPProvider(
+    f'https://eth-mainnet.alchemyapi.io/v2/{ALCHEMY_API_KEY}'))
 
 async def add_token(session, contract_address, first_seen, volume):
     new_token = CurrentToken(contract_address=contract_address,
@@ -91,10 +89,10 @@ async def main():
 
   while True:
       try:
-          block = w3.eth.getBlock('latest')
+          block = w3.eth.get_block('latest')
           if prevBlock != block.number:
               for tx in block.transactions:
-                  transaction = w3.eth.getTransaction(tx)
+                  transaction = w3.eth.get_transaction(tx)
                   contract_address = transaction['to']
                   value = transaction['value']
   
@@ -139,7 +137,7 @@ async def main():
                   value_adjusted = value / 10 ** decimals
   
                   # Interact with database
-                  async with Session() as session:
+                  async with AsyncSession() as session:
                       if not await was_seen_before(session, contract_address):
                           contract_first_seen[contract_address] = time.time()
                           await add_token(session, contract_address, contract_first_seen[contract_address], value_adjusted)
@@ -147,7 +145,7 @@ async def main():
                           await update_token(session, contract_address, value_adjusted)
   
               # After processing all transactions in the block
-              async with Session() as session:
+              async with AsyncSession() as session:
                   await consolidate_old_tokens(session)
   
               prevBlock = block.number
