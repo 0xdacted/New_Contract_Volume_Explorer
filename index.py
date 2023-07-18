@@ -85,6 +85,7 @@ cache_abi = {}
 
 
 async def main():
+  global prevBlock
   await init_db()
 
   while True:
@@ -102,6 +103,11 @@ async def main():
                           response = send_request(
                               f'https://api.etherscan.io/api?module=contract&action=getabi&address={contract_address}&apikey={ETHERSCAN_API_KEY}')
                           abi = response['result']
+                          if abi == 'Contract source code not verified':
+                              print(
+                                  f"Cannot verify contract source code: {contract_address}")
+                              cache_abi[contract_address] = 'unverified'
+                              continue
                           cache_abi[contract_address] = abi
                       except Exception as e:
                           print(
@@ -109,6 +115,9 @@ async def main():
                           continue
                         
                   # Exclude non-token/NFT transactions
+                  if cache_abi[contract_address] == 'unverified':
+                      continue
+                    
                   contract = w3.eth.contract(
                       address=contract_address, abi=cache_abi[contract_address])
   
@@ -152,5 +161,6 @@ async def main():
           await asyncio.sleep(15)  # sleeps for 15 seconds
       except Exception as e:
           print(f"An unexpected error occurred: {e}")
+
           
 asyncio.run(main())
