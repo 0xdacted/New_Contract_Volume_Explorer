@@ -41,6 +41,7 @@ async def add_token(session, contract_address, first_seen, volume):
 async def update_token(session, contract_address, volume):
     token = await session.query(CurrentToken).filter_by(contract_address=contract_address).first()
     token.volume += volume
+    print(f'${token}')
     await session.commit()
 
 
@@ -55,8 +56,8 @@ async def consolidate_old_tokens(session):
 
 
 async def was_seen_before(session, contract_address):
-    token = await session.query(OldToken).filter_by(contract_address=contract_address).first()
-    return token is not None
+    result = await session.run_sync(lambda session: session.query(OldToken).filter_by(contract_address=contract_address).first())
+    return result is not None
 
 def get_token_decimals(contract):
     try:
@@ -125,8 +126,10 @@ async def main():
                       # Decode function input to get function name
                       input_data = transaction['input']
                       try:
-                          function_name, _ = contract.decode_function_input(
+                          function_call, _ = contract.decode_function_input(
                               input_data)
+                          function_name = function_call.fn_name
+
                       except Exception as e:
                           print(
                               f"Failed to decode input data for contract {contract_address}, error: {e} Ignoring this transaction.")
@@ -135,7 +138,7 @@ async def main():
                       if function_name not in ['transfer', 'transferFrom']:
                         print(
                             f"The function {function_name} for contract {contract_address} is not transfer or transferFrom. Ignoring this transaction.")
-                          continue
+                        continue
                   except Exception as e:
                       print(
                           f"Failed to decode input data for contract {contract_address}, error: {e} Ignoring this transaction.")
