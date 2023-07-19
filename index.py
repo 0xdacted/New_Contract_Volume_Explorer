@@ -1,8 +1,10 @@
 from web3 import Web3
 from dotenv import load_dotenv
+import aiohttp
 import os
 import requests
 import asyncio
+import ssl
 from collections import defaultdict
 from classes import CurrentToken, OldToken
 import time
@@ -31,10 +33,18 @@ AsyncSession = sessionmaker(
 w3 = Web3(Web3.HTTPProvider(
     f'https://eth-mainnet.alchemyapi.io/v2/{ALCHEMY_API_KEY}'))
 
+
+async def create_symbol_id_mapping():
+    response = await send_request('https://api.coingecko.com/api/v3/coins/list')
+    symbol_id_map = {coin['symbol']: coin['id'] for coin in response}
+    return symbol_id_map
+
+
 async def add_token(session, contract_address, first_seen, volume):
     new_token = CurrentToken(contract_address=contract_address,
                              first_seen=datetime.fromtimestamp(first_seen), volume=volume)
     session.add(new_token)
+    print(f'${new_token}')
     await session.commit()
 
 
@@ -59,6 +69,20 @@ async def was_seen_before(session, contract_address):
     result = await session.run_sync(lambda session: session.query(OldToken).filter_by(contract_address=contract_address).first())
     return result is not None
 
+
+async def get_token_usd_price(token_symbol, symbol_id_map):
+    # use the API of your choice to get the USD price
+    # ensure the token_symbol is url encoded
+    token_id = symbol_id_map.get(token_symbol)
+    if token_id is None:
+        print(f"Token {token_symbol} is not found in the API response")
+        return None  # return a default value or handle this case as needed
+    token_id_encoded = requests.utils.quote(token_id)
+    response = await send_request(f'https://api.coingecko.com/api/v3/simple/price?ids={token_id_encoded}&vs_currencies=usd')
+    print(f"{response}")
+    return response[token_id]['usd']
+
+
 def get_token_decimals(contract):
     try:
         return contract.functions.decimals().call()
@@ -66,18 +90,36 @@ def get_token_decimals(contract):
         print(f"Failed to get token decimals for contract {contract_address}, error: {e}")
         return 18  # default to 18 if cannot fetch decimals
 
-def send_request(url):
-    while True:
-        try:
-            response = requests.get(url)
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.HTTPError as err:
-            if response.status_code == 429:  # status code for rate limit error
-                print("Rate limit exceeded. Sleeping for a minute...")
-                time.sleep(60)  # Sleep for a minute
-            else:
-                raise err  # Re-raise the exception if it's not rate limit error
+
+def get_token_symbol(contract):
+    try:
+        # The function call 'symbol' is a common interface for tokens
+        return contract.functions.symbol().call().lower()
+    except Exception as e:
+        print(
+            f"Could not fetch symbol for contract {contract.address}, error: {e}")
+        return None
+
+
+async def send_request(url):
+    sslcontext = ssl.create_default_context()
+    sslcontext.check_hostname = False
+    sslcontext.verify_mode = ssl.CERT_NONE
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                async with session.get(url, ssl=sslcontext) as response:
+                    if response.status == 429:
+                        print("Rate limit exceeded. Sleeping for a minute...")
+                        await asyncio.sleep(60)
+                        continue
+                    response.raise_for_status()
+                    json_response = await response.json()
+                    return json_response
+            except aiohttp.ClientResponseError as err:
+                print(f"HTTP request failed with error: {err}")
+            except Exception as e:
+                print(f"An unexpected error occurred: {e}")
 
 volume = defaultdict(int)
 contract_first_seen = {}
@@ -88,6 +130,7 @@ cache_abi = {}
 async def main():
   global prevBlock
   await init_db()
+  symbol_id_map = await create_symbol_id_mapping()
 
   while True:
       try:
@@ -101,7 +144,7 @@ async def main():
                   # Fetch ABI only if it's not in the cache
                   if contract_address not in cache_abi:
                       try:
-                          response = send_request(
+                          response = await send_request(
                               f'https://api.etherscan.io/api?module=contract&action=getabi&address={contract_address}&apikey={ETHERSCAN_API_KEY}')
                           abi = response['result']
                           if abi == 'Contract source code not verified':
@@ -146,17 +189,26 @@ async def main():
                     
                   # Get token decimals
                   decimals = get_token_decimals(contract)
-  
+
                   # Adjust the value accordingly
                   value_adjusted = value / 10 ** decimals
+
+                  # Get the token symbol or ticker
+                  token_symbol = get_token_symbol(contract)
+
+                  # Get the token's current USD price
+                  usd_price = await get_token_usd_price(token_symbol, symbol_id_map)
+
+                  # Calculate the transfer value in USD
+                  usd_value = value_adjusted * usd_price
   
                   # Interact with database
                   async with AsyncSession() as session:
                       if not await was_seen_before(session, contract_address):
                           contract_first_seen[contract_address] = time.time()
-                          await add_token(session, contract_address, contract_first_seen[contract_address], value_adjusted)
+                          await add_token(session, contract_address, contract_first_seen[contract_address], usd_value)
                       else:
-                          await update_token(session, contract_address, value_adjusted)
+                          await update_token(session, contract_address, usd_value)
   
               # After processing all transactions in the block
               async with AsyncSession() as session:
