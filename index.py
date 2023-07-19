@@ -8,7 +8,8 @@ import ssl
 from collections import defaultdict
 from classes import CurrentToken, OldToken
 import time
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from classes import Base, CurrentToken, OldToken
@@ -49,14 +50,31 @@ async def add_token(session, contract_address, first_seen, volume):
 
 
 async def update_token(session, contract_address, volume):
-    token = await session.query(CurrentToken).filter_by(contract_address=contract_address).first()
+    stmt = select(CurrentToken).filter_by(contract_address=contract_address)
+    result = await session.execute(stmt)
+    token = result.scalars().first()
     token.volume += volume
     print(f'${token}')
     await session.commit()
 
 
+async def try_add_token(session, contract_address, first_seen, volume):
+    try:
+        new_token = CurrentToken(contract_address=contract_address,
+                                 first_seen=datetime.fromtimestamp(first_seen), volume=volume)
+        session.add(new_token)
+        await session.commit()
+        print(f'Added new token: {new_token}')
+    except IntegrityError:
+        await session.rollback()  # important: reset the session
+        await update_token(session, contract_address, volume)
+
+
 async def consolidate_old_tokens(session):
-    tokens = await session.query(CurrentToken).filter(CurrentToken.first_seen < datetime.now() - timedelta(hours=24)).all()
+    stmt = select(CurrentToken).filter(CurrentToken.first_seen <
+                                       datetime.now() - timedelta(hours=24))
+    result = await session.execute(stmt)
+    tokens = result.scalars().all()
     for token in tokens:
         old_token = OldToken(contract_address=token.contract_address,
                              first_seen=token.first_seen, volume=token.volume)
@@ -66,8 +84,15 @@ async def consolidate_old_tokens(session):
 
 
 async def was_seen_before(session, contract_address):
-    result = await session.run_sync(lambda session: session.query(OldToken).filter_by(contract_address=contract_address).first())
-    return result is not None
+    stmt_old_token = select(OldToken).filter_by(
+        contract_address=contract_address)
+    stmt_current_token = select(CurrentToken).filter_by(
+        contract_address=contract_address)
+
+    old_token_result = await session.execute(stmt_old_token)
+    current_token_result = await session.execute(stmt_current_token)
+
+    return old_token_result.scalars().first() is not None or current_token_result.scalars().first() is not None
 
 
 async def get_token_usd_price(token_symbol, symbol_id_map):
@@ -206,10 +231,10 @@ async def main():
                   async with AsyncSession() as session:
                       if not await was_seen_before(session, contract_address):
                           contract_first_seen[contract_address] = time.time()
-                          await add_token(session, contract_address, contract_first_seen[contract_address], usd_value)
+                          await try_add_token(session, contract_address, contract_first_seen[contract_address], usd_value)
                       else:
                           await update_token(session, contract_address, usd_value)
-  
+
               # After processing all transactions in the block
               async with AsyncSession() as session:
                   await consolidate_old_tokens(session)
